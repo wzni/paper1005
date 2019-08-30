@@ -1,0 +1,1673 @@
+﻿
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title> Seamless Mipmap Filtering for Dual Paraboloid Maps - Paper1005 </title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1, minimum-scale=1.0, maximum-scale=1.0">
+  <style>
+    body {
+      color: #ffffff;
+      font-family: Monospace;
+      font-size: 13px;
+      text-align: center;
+      font-weight: bold;
+      background-color: #000000;
+      margin: 0px;
+      overflow: hidden;
+    }
+
+    #info {
+      position: absolute;
+      top: 0px;
+      width: 100%;
+      padding: 5px;
+    }
+
+    a {
+      color: #ffffff;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="container"></div>
+  <div id="info"> Paper1005 Demo </div>
+
+  <script src="build/three.js"></script>
+  <script src="js/loaders/GLTFLoader.js"></script>
+  <script src="js/controls/OrbitControls2.js"></script>
+  <script src="js/WebGL.js"></script>
+  <script src="js/libs/stats.min.js"></script>
+  <script src="js/libs/dat.gui.js"></script>
+  <script src="js/controls/DeviceOrientationControls.js"></script>
+  <script src="js/controls/DragControls.js"></script>
+  <script src="bezier_length.js"></script>
+  
+<script id="csm_dp_shader_vs" type="x-shader/x-vertex">
+out vec3 bv;
+out vec2 bt;
+out vec3 bn;
+void main()
+{
+  bt = uv;
+  vec4 hv = modelMatrix * vec4( position, 1.0 );
+  bv = hv.xyz/hv.w;
+  bn = mat3(modelMatrix) * normal.xyz;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+}
+</script>
+
+<script id="csm_dp_shader_fs" type="x-shader/x-fragment">
+#define PI 3.14159265358979
+#define M 4
+#define fCSMBias 0.068
+#define OFFSET 0.02
+#define SCALEFACTOR 1.11
+#define ALPHA 0.06
+
+in vec2 bt;
+in vec3 bv;
+in vec3 bn;
+
+uniform vec3 l;
+uniform vec3 eye;
+uniform float zNear;
+uniform float zFar;
+uniform float lightsize;
+uniform sampler2D tex0;
+uniform sampler2D dpmap[2 * (M +1)];
+uniform mat4 lightmv;
+uniform float shadow_a;
+uniform float shadow_b;
+
+vec4 getweights(float alpha, float k, float m)
+{
+  vec4 weights = vec4(exp(-alpha*(k) *(k) / (m*m)),
+  exp(-alpha*(k +1.0) *(k +1.0) / (m*m)),
+  exp(-alpha*(k +2.0) *(k +2.0) / (m*m)),
+  exp(-alpha*(k +3.0) *(k +3.0) / (m*m)));
+  return weights;
+}
+
+float estimateFilterWidth(float lightsize, float currentDepth, float blockerDepth)
+{
+  // receiver depth
+  float receiver = currentDepth;
+  float FilterWidth = (receiver -blockerDepth) *lightsize / (2.0 * currentDepth*blockerDepth);
+  return FilterWidth;
+}
+
+float estimatefwo(float lightsize, float distance, float smpos)
+{
+  float aa, bb, cc;
+  aa = lightsize / distance;
+  bb = lightsize / smpos;
+
+  aa = clamp(aa, 0.0, 1.0);
+  bb = clamp(bb, 0.0, 1.0);
+  cc = aa*bb +sqrt( max((1.0 -aa*aa) *(1.0 -bb*bb),0.0));
+
+  return sqrt(1.0-cc*cc) / (1.0+cc);  // DP map filter size
+}
+
+float fscm2dp(float ws)
+{
+  return ws;
+  ws = clamp(ws, 0.0, 2.0);
+  if (ws < 1.0)
+  {
+    ws /= sqrt(ws*ws+1.0) +1.0;
+  }
+  else
+  {
+    ws = 2.0 -ws;
+    ws = sqrt(ws*ws+1.0) -ws;
+  }
+  return ws;
+}
+
+float ufunc( float zval, float fs )
+{
+vec2 p = vec2(sqrt(1.0-zval*zval), abs(zval));
+vec2 t = vec2(2.0*fs , 1.0-fs*fs)/(1.0+fs*fs);
+return max(p.x/(1.0+p.y)
+- (p.x*t.y-p.y*t.x)/(1.0+dot(p,t)), fs);
+}
+
+vec4 _f4mipmapDPMAP(sampler2D frontface, sampler2D backface, vec3 uv, float fs)
+{
+  fs = fscm2dp(fs);
+  uv = normalize(uv);
+
+  fs=.74*ufunc(uv.z, fs);
+
+  float W0 = float(textureSize(frontface, 0).x);
+  float ml = log(W0*fs) / log(2.0);
+  vec2 tc = vec2(uv.x, uv.y) / (1.0 +uv.z);
+  vec2 coordf = vec2(-tc.x, tc.y) *.5+.5;
+  vec4 cfront= textureLod(frontface, coordf.xy, ml);
+  tc = uv.xy / (1.0 -uv.z);
+  vec2 coordb = tc*.5 +.5;
+  vec4 cback = textureLod(backface, coordb.xy, ml);
+
+  //seams
+ // return uv.z < 0.0 ? cback : cfront;
+
+  // delete seams
+  float resolution = 1.0 / fs;
+  float sss = clamp((length(uv.xy)/(1.0 +abs(uv.z))-1.0)*resolution+1.0, 0.0, 1.0) * .5;
+  if(uv.z < 0.0)
+  sss = 1.0 -sss;
+  return mix(cfront, cback, sss);
+}
+
+vec4 f4mipmapDPMAP(sampler2D frontface, sampler2D backface, vec3 uv, float fs)
+{
+  return _f4mipmapDPMAP(frontface, backface, uv, fs) *2.0-1.0;
+}
+
+float CSSM_Z_Basis(
+  vec3 uv,
+  float currentDepth,
+  float filterwidth
+){
+  vec4 tmp, sin_val_z, cos_val_z;
+  float sum0, sum1;
+  float depthvalue = f4mipmapDPMAP(dpmap[0], dpmap[1], uv, filterwidth).x;
+  sin_val_z = f4mipmapDPMAP(dpmap[5], dpmap[5+M], uv, filterwidth);
+  cos_val_z = f4mipmapDPMAP(dpmap[4], dpmap[4+M], uv, filterwidth);
+  tmp = PI*vec4(1.0, 3.0, 5.0, 7.0);
+  vec4 weights = getweights(ALPHA, 1.0, float(M));
+  sum0 = dot(sin(tmp*(currentDepth-fCSMBias)) / tmp, cos_val_z*weights);
+  sum1 = dot(cos(tmp*(currentDepth-fCSMBias)) / tmp, sin_val_z*weights);
+  return 0.5*depthvalue +2.0*(sum0 -sum1);
+}
+
+float CSSM_Basis(
+  vec3 uv,
+  float currentDepth,
+  float filterwidth,
+  float supress_flag
+){
+  vec4 tmp, sin_val, cos_val;
+  float sum0, sum1;
+
+  sin_val = f4mipmapDPMAP(dpmap[3], dpmap[3 +M], uv, filterwidth);
+  cos_val = f4mipmapDPMAP(dpmap[2], dpmap[2 +M], uv, filterwidth);
+
+  tmp = PI*vec4(1.0, 3.0, 5.0, 7.0);
+  vec4 weights = getweights(ALPHA, 1.0, float(M));
+
+  sum0 = dot(cos(tmp*(currentDepth -fCSMBias)) / tmp, sin_val*weights);
+  sum1 = dot(sin(tmp*(currentDepth -fCSMBias)) / tmp, cos_val*weights);
+
+  float rec = 0.5 +2.0*(sum0 - sum1);
+  if(supress_flag == 1.0)
+  rec = SCALEFACTOR*(rec -OFFSET);
+  return clamp((1.0*rec), 0.0, 1.0);
+}
+
+float FindBlockDepth(
+  vec3 uv,
+  float currentDepth,
+  float distance,
+  float lightsize,
+  float zNear,
+  float zFar
+){
+  float fs = estimatefwo(lightsize, distance, zNear);
+  fs = clamp(fs, 0.0, 2.0);
+  float blockedNum = 1.0 - CSSM_Basis(uv, currentDepth, fs, 0.0);
+  if( blockedNum>0.001 )
+  {
+    float Z_avg;
+    Z_avg = CSSM_Z_Basis(uv, currentDepth, fs) / blockedNum;
+    return Z_avg*zFar;
+  }
+  else
+    return distance+1.0;
+}
+
+float csm_pcf_filter(
+  vec3 uv,
+  float currentDepth,
+  float filterWidth
+){
+  float shadow = CSSM_Basis(uv, currentDepth, filterWidth, 1.0);
+  return shadow;
+}
+
+float CSM_SoftShadow(
+  vec3 uv,
+  float distance,
+  float lightsize,
+  float zNear,
+  float zFar,
+  float shadow_a,
+  float shadow_b
+){
+  float currentDepth = distance/zFar;
+  float blockerdepth = FindBlockDepth(uv, currentDepth, distance, lightsize, zNear, zFar);
+  float shadow = 1.0;
+  if( blockerdepth < distance )
+  {
+    float FilterWidth = estimatefwo(lightsize, distance, blockerdepth);
+    shadow = csm_pcf_filter(uv, currentDepth, FilterWidth);
+    float temp = shadow_b*(blockerdepth - distance);
+    float power = 1.0 +shadow_a* exp(temp);
+    shadow = pow(shadow, power );
+  }
+  return shadow;
+}
+
+void main()
+{
+  gl_FragColor = vec4(1.0); //texture(tex0, bt);
+  float specular, diffuse, attenuation;
+  float ld;
+  vec3 ldir;
+  {
+    vec3 lpos, edir, ndir;
+    ndir = normalize(bn);
+    lpos = l-bv;
+    ld = length(lpos);
+    ldir = lpos/ld;
+    edir = normalize( reflect( -(eye-bv), ndir) );  // normalize(  (eye-bv) - 2.0*dot( (eye-bv) ,ndir)* ndir);
+    diffuse  = max(dot(ldir, ndir), 0.0);
+    specular = pow(max(dot(ldir,edir),0.0), 8.0*mix( 4.0, 1.0, lightsize/.2 )   );
+    attenuation = 1.5 / (1.0 + mix( .5, .75, lightsize/.2 ) * ld*ld );
+  }
+
+  float vb = CSM_SoftShadow(  -ldir*mat3(lightmv), ld, lightsize, zNear, zFar, shadow_a, shadow_b);
+
+  // gl_FragColor.xyz = vec3(attenuation*( mix(diffuse,specular,.25) ) * vb);
+  gl_FragColor.xyz = vec3(diffuse* vb);
+
+  //gl_FragColor = (textureLod( dpmap[1], bt, 5.0 ) + texture( dpmap[5], bt ))/2.0;
+  gl_FragColor.xyz = vec3(attenuation*diffuse* vb);
+
+
+  gl_FragColor.w = 1.0;
+}
+</script>
+
+<script id="csm_cm_shader_vs" type="x-shader/x-vertex">
+out vec3 bv;
+out vec2 bt;
+out vec3 bn;
+void main()
+{
+  bt = uv;
+  vec4 hv = modelMatrix * vec4( position, 1.0 );
+  bv = hv.xyz/hv.w;
+  bn = mat3(modelMatrix) * normal.xyz;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+}
+</script>
+
+<script id="csm_cm_shader_fs" type="x-shader/x-fragment">
+#define PI 3.14159265358979
+#define M 4
+#define fCSMBias 0.068
+#define OFFSET 0.02
+#define SCALEFACTOR 1.11
+#define ALPHA 0.06
+
+in vec2 bt;
+in vec3 bv;
+in vec3 bn;
+
+uniform vec3 l;
+uniform vec3 eye;
+uniform float zNear;
+uniform float zFar;
+uniform float lightsize;
+uniform sampler2D tex0;
+uniform samplerCube cmmap[M +1];
+uniform mat4 lightmv;
+uniform float shadow_a;
+uniform float shadow_b;
+uniform float tex_size;
+
+vec4 getweights(float alpha, float k, float m)
+{
+  vec4 weights = vec4(exp(-alpha*(k) *(k) / (m*m)),
+  exp(-alpha*(k +1.0) *(k +1.0) / (m*m)),
+  exp(-alpha*(k +2.0) *(k +2.0) / (m*m)),
+  exp(-alpha*(k +3.0) *(k +3.0) / (m*m)));
+  return weights;
+}
+
+float estimateFilterWidth(float lightsize, float currentDepth, float blockerDepth)
+{   // receiver depth
+  float receiver = currentDepth;
+  float FilterWidth = (receiver -blockerDepth) *lightsize / (2.0 * currentDepth*blockerDepth);
+  return FilterWidth;
+}
+
+float estimatefwo(float lightsize, float distance, float smpos)
+{
+  float aa, bb, cc;
+  aa = lightsize / distance;
+  bb = lightsize / smpos;
+  aa = clamp(aa, 0.0, 1.0);
+  bb = clamp(bb, 0.0, 1.0);
+
+  //cc = aa*bb +sqrt( max((1.0 -aa*aa) *(1.0 -bb*bb),0.0));
+  //return sqrt(max(1.0 / (cc*cc) -1.0,0.0));
+
+  cc = aa*bb +sqrt((1.0 -aa*aa) *(1.0 -bb*bb));
+  return sqrt(1.0 / (cc*cc) -1.0);
+}
+
+vec4 _f4mipmapCMMAP(samplerCube cmmap, vec3 uv, float fs)
+{
+  vec4 result;
+  uv = normalize(uv); 
+  float W0 = float(textureSize(cmmap, 0).x);
+  float ml = log(W0*fs) / log(2.0);
+  result = textureLod(cmmap, uv, ml);
+  return result;
+}
+
+vec4 f4mipmapCMMAP(samplerCube cmmap, vec3 uv, float fs)
+{
+  return _f4mipmapCMMAP(cmmap, uv, fs) *2.0-1.0;
+}
+
+float CSSM_CM_Z_Basis(
+  vec3 uv,
+  float currentDepth,
+  float filterwidth
+){
+  vec4 tmp, sin_val_z, cos_val_z;
+  float sum0, sum1;
+  float depthvalue = f4mipmapCMMAP(cmmap[0], uv, filterwidth).x;
+  sin_val_z = f4mipmapCMMAP(cmmap[4], uv, filterwidth);
+  cos_val_z = f4mipmapCMMAP(cmmap[3], uv, filterwidth);
+  tmp = PI*vec4(1.0, 3.0, 5.0, 7.0);
+  vec4 weights = getweights(ALPHA, 1.0, float(M));
+  sum0 = dot(sin(tmp*(currentDepth -fCSMBias)) / tmp, cos_val_z*weights);
+  sum1 = dot(cos(tmp*(currentDepth -fCSMBias)) / tmp, sin_val_z*weights);
+  return 0.5*depthvalue +2.0*(sum0 -sum1);
+}
+
+float CSSM_CM_Basis(
+  vec3 uv,
+  float currentDepth,
+  float filterwidth, 
+  float supress_flag
+){
+  vec4 tmp, sin_val, cos_val;
+  float sum0, sum1;
+  sin_val = f4mipmapCMMAP(cmmap[2], uv, filterwidth);
+  cos_val = f4mipmapCMMAP(cmmap[1], uv, filterwidth);
+  tmp = PI*vec4(1.0, 3.0, 5.0, 7.0);
+  vec4 weights = getweights(ALPHA, 1.0, float(M));
+  sum0 = dot(cos(tmp*(currentDepth -fCSMBias)) / tmp, sin_val*weights);
+  sum1 = dot(sin(tmp*(currentDepth -fCSMBias)) / tmp, cos_val*weights);
+  float rec = 0.5 +2.0*(sum0 -sum1);
+  if (supress_flag == 1.0)
+  rec = SCALEFACTOR*(rec -OFFSET);
+  return clamp((1.0*rec), 0.0, 1.0);
+}
+
+float FindBlockDepth_CM(
+  vec3 uv,
+  float currentDepth,
+  float distance,
+  float lightsize,
+  float zNear,
+  float zFar
+ ){
+  float fs = estimatefwo(lightsize, distance, zNear);
+  fs = clamp(fs, 0.0, 2.0);
+  float blockedNum = 1.0 - CSSM_CM_Basis(uv, currentDepth, fs, 0.0);
+  if( blockedNum>0.001 )
+  {
+    float Z_avg;
+    Z_avg = CSSM_CM_Z_Basis(uv, currentDepth, fs) / blockedNum;
+    return Z_avg*zFar;
+  }
+  else
+  return distance+1.0;
+}
+
+float csm_cm_pcf_filter(
+  vec3 uv,
+  float currentDepth,
+  float filterWidth
+){
+  float shadow = CSSM_CM_Basis(uv, currentDepth, filterWidth, 1.0);
+  return shadow;
+}
+
+float CSM_CM_SoftShadow(
+  vec3 uv,
+  float distance,
+  float lightsize,
+  float zNear,
+  float zFar,
+  float shadow_a,
+  float shadow_b
+){
+  float currentDepth = distance/zFar;
+  float blockerdepth = FindBlockDepth_CM(uv, currentDepth, distance, lightsize, zNear, zFar);
+  float shadow = 1.0;
+  if( blockerdepth < distance  )
+  {
+    float FilterWidth = estimatefwo(lightsize, distance, blockerdepth);
+    shadow = csm_cm_pcf_filter(uv, currentDepth, FilterWidth);
+    float temp = shadow_b*(blockerdepth -distance);
+    float power = 1.0 +shadow_a* exp(temp);
+    shadow = pow(shadow, power);
+  }
+  return shadow;
+}
+
+void main()
+{
+
+  gl_FragColor = vec4(1.0);
+  float specular, diffuse, attenuation;
+  float ld;
+  vec3 ldir;
+  {
+    vec3 lpos, edir, ndir;
+    ndir = normalize(bn);
+    lpos = l-bv;
+    ld = length(lpos);
+    ldir = lpos/ld;
+    edir = normalize( reflect( -(eye-bv), ndir) );  // normalize(  (eye-bv) - 2.0*dot( (eye-bv) ,ndir)* ndir);
+    diffuse  = max(dot(ldir, ndir), 0.0);
+    specular = pow(max(dot(ldir,edir),0.0), 8.0*mix( 4.0, 1.0, lightsize/.2 )   );
+    attenuation = 1.5 / (1.0 + mix( .5, .75, lightsize/.2 ) * ld*ld );
+  }
+
+  float vb = CSM_CM_SoftShadow( -ldir*mat3(lightmv), ld, lightsize, zNear, zFar, shadow_a, shadow_b);
+  // gl_FragColor.xyz = vec3(attenuation*( mix(diffuse,specular,.25) ) * vb);
+  gl_FragColor.xyz = vec3(attenuation*diffuse* vb);
+  gl_FragColor.w=1.0;
+}
+
+
+
+
+
+
+
+
+
+</script>
+
+
+<script id="dp_shader_vs" type="x-shader/x-vertex">
+uniform mat4 mvp;
+uniform float zFar;
+out vec3 bc;
+void main()
+{
+  // vec4 hp = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+  // vec4 hp = projectionMatrix * viewMatrix * mix( modelMatrix0*position0, modelMatrix1*position1, weight );
+  // vec4 v0 = mix( modelMatrix0*position0, modelMatrix1*position1, weight );
+
+  vec4 v0 = modelMatrix * vec4( position, 1.0 );
+  v0 = v0/v0.w;
+
+  vec4 hp = mvp * v0;
+  vec3 dp = normalize(hp.xyz);
+  float  ll = length(hp.xyz);
+  gl_Position.x =  dp.x / (dp.z+1.0);
+  gl_Position.y = -dp.y / (dp.z+1.0);
+  float focal_length = 0.04;
+  float dist_focus_to_parabolid =  focal_length * 2.0*ll / ( ll+ hp.z) ;
+  float dist_vertex_to_parabolid = ll - dist_focus_to_parabolid;
+  gl_Position.z = dist_vertex_to_parabolid + focal_length  - 1.0 ;
+  gl_Position.w = 1.0;
+
+  bc = v0.xyz;
+}
+</script>
+
+<script id="dp_shader_fs" type="x-shader/x-fragment">
+in vec3 bc;
+uniform float zFar;
+uniform vec3 l;
+void main()
+{
+  float depth = length(bc-l) / zFar;
+  gl_FragColor = vec4(depth, 1.0, 1.0, 1.0);
+  gl_FragColor = (gl_FragColor+1.0) /2.0;
+  // gl_FragColor.xyz = bc;
+}
+</script>
+
+
+<script id="cm_shader_vs" type="x-shader/x-vertex">
+uniform mat4 mvp;
+uniform float zFar;
+out vec3 bc;
+void main()
+{
+  vec4 v0 = modelMatrix * vec4( position, 1.0 );
+  v0 = v0/v0.w;
+  gl_Position = mvp * v0;
+  bc = v0.xyz;
+}
+</script>
+
+<script id="cm_shader_fs" type="x-shader/x-fragment">
+in vec3 bc;
+uniform float zFar;
+uniform vec3 l;
+void main()
+{
+  float depth = length(bc-l) / zFar;
+  gl_FragColor = vec4(depth, 1.0, 1.0, 1.0);
+  gl_FragColor = (gl_FragColor+1.0) /2.0;
+  // gl_FragColor.xyz = bc;
+}
+</script>
+
+
+
+<script>
+  if (WEBGL.isWebGLAvailable() === false)
+    document.body.appendChild(WEBGL.getWebGLErrorMessage());
+  document.onselectstart = new Function('return false;');
+
+  var canvas = document.createElement('canvas');
+  gl = canvas.getContext('webgl2');
+
+  </script>
+
+  <script src="m4.js"></script>
+  <script src="g_vector.js"></script>
+  <script src="g_shader.js"></script>
+  <script src="shader_js/genbasis_shader.js"></script>
+  <script src="shader_js/genbasis_shader_cm.js"></script>
+  <script src="shader_js/drawtex_shader.js"></script>
+  <script src="shader_js/drawcmtex_shader.js"></script>
+
+  <script>
+
+  var container, gui, stats, renderer;
+
+  var state_api = { state: 'Walking' };
+
+
+  var map_select = ['Seamless DP Map', 'Cubemap'];
+  var map_select_api = { map_type: 'Seamless DP Map' };
+  var maptype = 0;
+
+
+  var settings;
+
+  var cm_camera, cm_face_mat, cm_screen_mat, cm_rt, cm_texid;
+  var cameraRTT, materialRTT, materialScreen, texdp_rt_id, texdp_id;
+
+
+  var cameraScreen, cameraScreen_controls;
+  var screen_zmesh1, screen_zmesh2;
+  var screen_mesh; 
+
+  var sceneScreen;
+  var light_sphere;
+
+  var M = 4;
+  var zNear = 0.3;
+  var zFar = Math.sqrt(12.0);
+  var shadow_a = 25.0;
+  var shadow_b = 20.0;
+
+
+  var cm_side = 512;
+  var dp_side = 886;
+
+  var dp_fbo, dp_rbo;
+  var cm_fbo, cm_rbo;
+
+  var lightsize = .028;
+  var tiles_per_second = 5;
+  var tiles_length = .2;
+  var my_quad, my_quad_buffer;
+  var time_scale = 60;
+  var draw_tex_id = 1;
+
+  var model;
+  var modelforward0 = new THREE.Vector3(0, 0, 1);
+  var modelforward = new THREE.Vector3(0, 0, 1);
+  var actions, activeAction, previousAction;
+  var my_dot;
+
+  function onWindowResize()
+  {
+    cameraScreen.aspect = window.innerWidth / window.innerHeight;
+    cameraScreen.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+
+  function init()
+  {
+    window.addEventListener('resize', onWindowResize, false);
+
+    gui = new dat.GUI();
+
+    stats = new Stats();
+
+    renderer = new THREE.WebGLRenderer({ canvas: canvas, context: gl });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.autoClear = false;
+    
+    container = document.getElementById('container');
+    container.appendChild(renderer.domElement);
+    container.appendChild(stats.dom);
+
+    cm_camera = new THREE.OrthographicCamera(-100, 100, -100, 100, -100, 100);
+    cm_face_mat = new THREE.ShaderMaterial({
+      uniforms: {
+        mvp: { value: new THREE.Matrix4() },
+        zFar: { value: zFar },
+        l: { value: new THREE.Vector3(0, 0, 0) }
+      },
+      vertexShader: document.getElementById('cm_shader_vs').textContent,
+      fragmentShader: document.getElementById('cm_shader_fs').textContent,
+    });
+    cm_rt = new Array(M+1);
+    cm_texid = new Array(M+1);
+    var i, s;
+    for(i=0; i<M+1 ; i++)
+    {
+      cm_rt[i] = new THREE.WebGLRenderTargetCube(cm_side, cm_side, { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat });
+      for(s=0; s<6; s++)
+        renderer.setRenderTarget(cm_rt[i],s);
+      cm_texid[i] = renderer.properties.get(cm_rt[i].texture).__webglTexture;
+    }
+
+    cameraRTT = new THREE.OrthographicCamera(-100, 100, -100, 100, -100, 100);
+    materialRTT = new THREE.ShaderMaterial({
+      uniforms: {
+        mvp: { value: new THREE.Matrix4() },
+        zFar: { value: zFar },
+        l: { value: new THREE.Vector3(0, 0, 0) }
+      },
+      vertexShader: document.getElementById('dp_shader_vs').textContent,
+      fragmentShader: document.getElementById('dp_shader_fs').textContent,
+      //side: THREE.DoubleSide,
+    });
+
+    cameraScreen = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 1000);
+    cameraScreen.position.set(.3, 3, 3);
+
+    cameraScreen_controls = new THREE.OrbitControls(cameraScreen, renderer.domElement);
+    cameraScreen_controls.maxPolarAngle = Math.PI * 0.5;
+    cameraScreen_controls.minDistance = 0.01;
+    cameraScreen_controls.maxDistance = 12;
+    cameraScreen_controls.target.set(.3, 0, 0);
+    cameraScreen_controls.update();
+    /*
+    cameraScreen_controls = new THREE.DeviceOrientationControls(cameraScreen);
+    cameraScreen_controls.update();
+    */
+
+
+    texdp_id = new Array(2 * (M + 1));
+    texdp_rt_id = new Array(2 * (M + 1));
+    var i;
+    for (i = 0; i < 2 * (M + 1) ; i++)
+    {
+      texdp_rt_id[i] = new THREE.WebGLRenderTarget(dp_side, dp_side, { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat });
+      renderer.setRenderTarget(texdp_rt_id[i]);
+      renderer.clear();
+      texdp_id[i] = renderer.properties.get(texdp_rt_id[i].texture).__webglTexture;
+    }
+
+    materialScreen = new THREE.ShaderMaterial({
+      uniforms: {
+        l: { value: new THREE.Vector3() },
+        eye: { value: new THREE.Vector3() },
+        zNear: { value: zNear },
+        zFar: { value: zFar },
+        lightsize: { value: lightsize },
+        dpmap: {value: [texdp_rt_id[0].texture, texdp_rt_id[1].texture,
+                        texdp_rt_id[2].texture, texdp_rt_id[3].texture,
+                        texdp_rt_id[4].texture, texdp_rt_id[5].texture,
+                        texdp_rt_id[6].texture, texdp_rt_id[7].texture,
+                        texdp_rt_id[8].texture, texdp_rt_id[9].texture]},
+        tex0: { value: texdp_rt_id[1].texture },
+        lightmv: { value: new THREE.Matrix4() },
+        shadow_a: { value: shadow_a },
+        shadow_b: { value: shadow_b },
+      },
+      vertexShader: document.getElementById('csm_dp_shader_vs').textContent,
+      fragmentShader: document.getElementById('csm_dp_shader_fs').textContent
+    });
+
+
+      cm_screen_mat = new THREE.ShaderMaterial({
+      uniforms: {
+        l: { value: new THREE.Vector3() },
+        eye: { value: new THREE.Vector3() },
+        zNear: { value: zNear },
+        zFar: { value: zFar },
+        lightsize: { value: lightsize },
+        cmmap: {value: [cm_rt[0].texture, 
+                        cm_rt[1].texture,
+                        cm_rt[2].texture, 
+                        cm_rt[3].texture,
+                        cm_rt[4].texture]},
+        tex0: { value: cm_rt[1].texture },
+        lightmv: { value: new THREE.Matrix4() },
+        shadow_a: { value: shadow_a },
+        shadow_b: { value: shadow_b },
+      },
+      vertexShader: document.getElementById('csm_cm_shader_vs').textContent,
+      fragmentShader: document.getElementById('csm_cm_shader_fs').textContent
+    });
+
+    
+
+
+    my_quad = new Float32Array([0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, ]);
+    my_quad.n = 6;
+
+    var grid;
+
+
+
+    {
+      var rt_geometry = new THREE.TorusBufferGeometry(.2, .05, 15, 30);
+      screen_zmesh1 = new THREE.Mesh(rt_geometry, materialScreen);
+      screen_zmesh1.position.set(0, .25, 0);
+      screen_zmesh1.scale.set(1,1,1);
+      screen_zmesh1.rotation.y = 0;
+      screen_zmesh2 = new THREE.Mesh(rt_geometry, materialScreen);
+      screen_zmesh2.position.set(0, .5, 0);
+      screen_zmesh2.scale.set(0.75, 0.75, 0.75);
+      screen_zmesh2.rotation.y = Math.PI / 2;
+
+      screen_mesh = new THREE.Mesh(new THREE.PlaneBufferGeometry(20, 20, 100, 100), materialScreen);
+      screen_mesh.rotation.x = -Math.PI / 2;
+
+      grid = new THREE.GridHelper(20, 100, 0x000000, 0x000000);
+      grid.position.set(0, .002, 0);
+      grid.material.opacity = 0.2;
+      grid.material.transparent = true;
+
+      var geometry = new THREE.SphereBufferGeometry(1, 20, 20);
+      light_sphere = new THREE.Mesh(geometry, new THREE.MeshPhongMaterial({ color: 0xDDDDDD }));
+      light_sphere.position.set(.6,.8,.6);
+      light_sphere.scale.set(lightsize, lightsize, lightsize);
+
+      my_dot = new THREE.Mesh(geometry, new THREE.MeshPhongMaterial({ color: 0x7D400C }));
+      my_dot.position.set(.6, 0, .6);
+      my_dot.scale.set(lightsize, lightsize, lightsize);
+
+    }
+
+    sceneScreen = new THREE.Scene();
+    sceneScreen.add(screen_zmesh1);
+    sceneScreen.add(screen_zmesh2);
+    sceneScreen.add(screen_mesh);
+    sceneScreen.add(grid);
+    sceneScreen.add(light_sphere);
+    
+    sceneScreen.add(my_dot);
+    
+
+    objects = [];
+    objects.push(light_sphere);
+    //objects.push(screen_mesh);
+    dragControls = new THREE.DragControls(objects, cameraScreen, renderer.domElement);
+    dragControls.addEventListener('dragstart', function () {
+      cameraScreen_controls.enabled = false;
+    });
+    dragControls.addEventListener('dragend', function(my_event) {
+      cameraScreen_controls.enabled = true;
+      //my_dot.position.set(my_event.offset.x, my_event.offset.x, my_event.offset.z);
+      //line.geometry.verticesNeedUpdate = true;
+      //line.geometry.vertices[0].copy(my_event.offset.direction);
+      //line.geometry.vertices[1].copy(my_event.offset);
+
+    });
+
+    sceneScreen.background = new THREE.Color(0xe0e0e0);
+    sceneScreen.fog = new THREE.Fog(0xe0e0e0, 20, 100);
+    sceneScreen.add(new THREE.AmbientLight(0x666666));
+    var light = new THREE.DirectionalLight(0xdfebff, 1.75);
+    light.position.set(2, 8, 4);
+    //light.castShadow = true;
+    sceneScreen.add(light);
+    //sceneScreen.add(new THREE.CameraHelper(light.shadow.camera));
+
+    var material = new THREE.LineBasicMaterial({
+      color: 0x0000ff
+    });
+    lineA = new THREE.Geometry();
+    lineA.vertices.push(
+      new THREE.Vector3(0, 0, 1),
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(Math.sqrt(.5), 0, Math.sqrt(.5))
+    );
+    var line = new THREE.Line(lineA, material);
+    sceneScreen.add(line);
+
+    var loader = new THREE.GLTFLoader();
+    loader.load('models/gltf/RobotExpressive/RobotExpressive.glb', function (gltf) {
+
+      model = gltf.scene;
+      model.scale.set(.1, .1, .1);
+      model.translateOnAxis(modelforward, .3);
+      model.position.set(.6, 0, .6);
+      sceneScreen.add(model);
+
+      // console.log(model);
+
+      createGUI(model, gltf.animations);
+
+    }, undefined, function (e) {
+      console.error(e);
+    });
+
+    /*
+    for(i=0;i<1;i++)
+    {
+      var loader = new THREE.GLTFLoader();
+      loader.load('models/gltf/RobotExpressive/RobotExpressive.glb', function (gltf) {
+
+        model[i] = gltf.scene;
+        model[i].scale.set(.1, .1, .1);
+        model[i].translateOnAxis(modelforward, .3);
+        model[i].position.set(1, 0, 0);
+        sceneScreen.add(model[i]);
+
+        // console.log(model);
+
+        createGUI(model[i], gltf.animations);
+
+      }, undefined, function (e) {
+        console.error(e);
+      });
+    }*/
+
+  }
+
+  var mixer, clock;
+  function createGUI(model, animations)
+  {
+    var states = ['Idle', 'Walking', 'Running', 'Dance', 'Death', 'Sitting', 'Standing'];
+
+    mixer = new THREE.AnimationMixer(model);
+    actions = {};
+    for (var i = 0; i < animations.length; i++) {
+      var clip = animations[i];
+      var action = mixer.clipAction(clip);
+      actions[clip.name] = action;
+      if (states.indexOf(clip.name) >= 4) {
+        action.clampWhenFinished = true;
+        action.loop = THREE.LoopOnce;
+      }
+    }
+
+    activeAction = actions['Walking'];
+    activeAction.play();
+
+    // states
+    var statesFolder = gui.addFolder('States');
+    var states_clipCtrl = statesFolder.add(state_api, 'state').options(states);
+    states_clipCtrl.onChange(function ()
+    {
+
+    });
+    statesFolder.open();
+
+
+    // map selection
+    var map_select_Folder = gui.addFolder('Map selection');
+    var map_select_clipCtrl = map_select_Folder.add(map_select_api, 'map_type').options(map_select);
+    map_select_clipCtrl.onChange(function (val)
+    {
+      if( val=="Seamless DP Map" )
+      {
+        maptype = 0;
+        screen_zmesh1.material = materialScreen;
+        screen_zmesh2.material = materialScreen;
+        screen_mesh.material = materialScreen;
+      }
+      if( val=="DP map" )
+      {
+        maptype = 1;
+      }
+      if( val=="Cubemap" )
+      {
+        maptype = 2;
+        screen_zmesh1.material = cm_screen_mat;
+        screen_zmesh2.material = cm_screen_mat;
+        screen_mesh.material = cm_screen_mat;
+      }
+    });
+    map_select_Folder.open();
+
+
+    settings = {
+      'lightsize': lightsize,
+      'Tiles/Second': tiles_per_second,
+      'tex_id':draw_tex_id,
+      'time_scale': time_scale,
+      'full screen': 0
+  };
+
+    var expressionFolder = gui.addFolder('Expressions');
+    expressionFolder.add(settings, 'full screen', 0, 1, 1).onChange(
+      function (val) {
+        if (val == 1)
+          openFullscreen();
+        else
+          closeFullscreen();
+      });
+    expressionFolder.add(settings, 'lightsize', 0.02, .2, .001).onChange(
+      function (val) {
+        lightsize = val;
+        light_sphere.scale.set(lightsize, lightsize, lightsize);
+      });
+    expressionFolder.add(settings, 'Tiles/Second', 1, 10, .001).onChange(
+      function (val) {
+        tiles_per_second = val;
+      });
+    expressionFolder.add(settings, 'tex_id', -1, 4, 1).onChange(
+      function (val) {
+        draw_tex_id = val;
+      });
+    expressionFolder.add(settings, 'time_scale', 1, 100, 1).onChange(
+      function (val) {
+        time_scale = val;
+      });
+
+    expressionFolder.open();
+
+  }
+
+  var dt;
+  function animate()
+  {
+    dt = clock.getDelta();
+    if (mixer) mixer.update(dt * tiles_per_second*tiles_length);
+    requestAnimationFrame(animate);
+    cameraScreen_controls.update();
+    render();
+    stats.update();
+  }
+
+  </script>
+
+
+  <script>
+  function prepare_dpfbo()
+  {
+    dp_fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dp_fbo);
+
+    dp_rbo = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, dp_rbo);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, dp_side, dp_side);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, dp_rbo);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  function prepare_cmfbo()
+  {
+    cm_fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, cm_fbo);
+
+    cm_rbo = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, cm_rbo);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, cm_side, cm_side);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, cm_rbo);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  function genbasis_cmmap()
+  {
+    var fbo0 = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    var port0 = gl.getParameter(gl.VIEWPORT);
+    var tex0 = gl.getParameter(gl.TEXTURE_BINDING_CUBE_MAP);
+
+    var v0_enabled0 = gl.getVertexAttrib(genbasis_shader_cm.v0, gl.VERTEX_ATTRIB_ARRAY_ENABLED);
+    var t0_enabled0 = gl.getVertexAttrib(genbasis_shader_cm.t0, gl.VERTEX_ATTRIB_ARRAY_ENABLED);
+    gl.enableVertexAttribArray(genbasis_shader_cm.v0);
+    gl.enableVertexAttribArray(genbasis_shader_cm.t0);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, cm_fbo);
+    gl.viewport(0, 0, cm_side, cm_side);
+
+    var axis = [ [0,1,0], [0,-1,0], [-1,0,0], [1,0,0], [0,1,0], [0,1,0] ];
+    var angle = [Math.PI/2,Math.PI/2,Math.PI/2,Math.PI/2,  0  ,Math.PI];
+
+    // var cm_camera, cm_face_mat, cm_screen_mat;
+    // var cm_rt, cm_texid;
+
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2, gl.COLOR_ATTACHMENT3]);
+    for( i=0; i<6; i++ )
+    {
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_CUBE_MAP_POSITIVE_X+i, cm_texid[1], 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_CUBE_MAP_POSITIVE_X+i, cm_texid[2], 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT2, gl.TEXTURE_CUBE_MAP_POSITIVE_X+i, cm_texid[3], 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT3, gl.TEXTURE_CUBE_MAP_POSITIVE_X+i, cm_texid[4], 0);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_CUBE_MAP, cm_texid[0]);
+
+       mpj = m4.orthographic(0, 1, 0, 1, -1, 1);
+       mv  =                 m4.axisRotation( axis[i], angle[i] );
+       mv  = m4.multiply(mv, m4.scaling(1,-1,1)                 );
+
+      genbasis_shader_cm.use();
+        gl.uniformMatrix4fv(genbasis_shader_cm.mpj, false, mpj );
+        gl.uniformMatrix4fv(genbasis_shader_cm.mv, false, mv );
+        gl.uniform1i(genbasis_shader_cm.depthmap, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, my_quad_buffer);
+        gl.vertexAttribPointer(genbasis_shader_cm.v0, 2, gl.FLOAT, false, 8, 0);
+        gl.vertexAttribPointer(genbasis_shader_cm.t0, 2, gl.FLOAT, false, 8, 0);
+        gl.drawArrays(gl.TRIANGLES, 0, my_quad.n);
+
+    }
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+
+    for( i=0; i<M+1; i++ )
+     {
+      gl.bindTexture(gl.TEXTURE_CUBE_MAP, cm_texid[i]);
+      gl.texParameterf(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+      gl.texParameterf(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameterf(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameterf(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.generateMipmap(gl.TEXTURE_CUBE_MAP);
+    }
+
+    if (!v0_enabled0)
+      gl.disableVertexAttribArray(genbasis_shader_cm.v0);
+    if (!t0_enabled0)
+      gl.disableVertexAttribArray(genbasis_shader_cm.t0);
+
+    gl.bindTexture(gl.TEXTURE_CUBE_MAP, tex0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo0);
+    gl.viewport(port0[0], port0[1], port0[2], port0[3]);
+  }
+
+  function genbasis_dpmap()
+  {
+    var fbo0 = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    var port0 = gl.getParameter(gl.VIEWPORT);
+    var tex0 = gl.getParameter(gl.TEXTURE_BINDING_2D);
+    var v0_enabled0 = gl.getVertexAttrib(genbasis_shader.v0, gl.VERTEX_ATTRIB_ARRAY_ENABLED);
+    var t0_enabled0 = gl.getVertexAttrib(genbasis_shader.t0, gl.VERTEX_ATTRIB_ARRAY_ENABLED);
+    gl.enableVertexAttribArray(genbasis_shader.v0);
+    gl.enableVertexAttribArray(genbasis_shader.t0);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dp_fbo);
+    gl.viewport(0, 0, dp_side, dp_side);
+
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2, gl.COLOR_ATTACHMENT3]);
+    for (i = 0; i < 2; i++) {
+
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texdp_id[i * M + 1 + 1], 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, texdp_id[i * M + 1 + 2], 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT2, gl.TEXTURE_2D, texdp_id[i * M + 1 + 3], 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT3, gl.TEXTURE_2D, texdp_id[i * M + 1 + 4], 0);
+
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texdp_id[i]);
+
+      genbasis_shader.use();
+      gl.uniformMatrix4fv(genbasis_shader.mvp, false, m4.orthographic(0, 1, 0, 1, -1, 1));
+      gl.uniform1i(genbasis_shader.depthmap, 0);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, my_quad_buffer);
+      gl.vertexAttribPointer(genbasis_shader.v0, 2, gl.FLOAT, false, 8, 0);
+      gl.vertexAttribPointer(genbasis_shader.t0, 2, gl.FLOAT, false, 8, 0);
+      gl.drawArrays(gl.TRIANGLES, 0, my_quad.n);
+
+    }
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+
+    for (i = 0; i < 2 * (M + 1) ; i++) {
+      gl.bindTexture(gl.TEXTURE_2D, texdp_id[i]);
+      gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+      gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.generateMipmap(gl.TEXTURE_2D);
+    }
+
+    if (!v0_enabled0)
+      gl.disableVertexAttribArray(genbasis_shader.v0);
+    if (!t0_enabled0)
+      gl.disableVertexAttribArray(genbasis_shader.t0);
+
+    gl.bindTexture(gl.TEXTURE_2D, tex0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo0);
+    gl.viewport(port0[0], port0[1], port0[2], port0[3]);
+  }
+
+
+  function draw_tex(tex0, matrix) {
+    gl.activeTexture(gl.TEXTURE0);
+
+    var prev_tex0 = gl.getParameter(gl.TEXTURE_BINDING_2D);
+    gl.bindTexture(gl.TEXTURE_2D, tex0);
+
+    var v0_enabled0 = gl.getVertexAttrib(drawtex_shader.v0, gl.VERTEX_ATTRIB_ARRAY_ENABLED);
+    var t0_enabled0 = gl.getVertexAttrib(drawtex_shader.t0, gl.VERTEX_ATTRIB_ARRAY_ENABLED);
+    gl.enableVertexAttribArray(drawtex_shader.v0);
+    gl.enableVertexAttribArray(drawtex_shader.t0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, my_quad_buffer);
+    gl.vertexAttribPointer(drawtex_shader.v0, 2, gl.FLOAT, false, 8, 0);
+    gl.vertexAttribPointer(drawtex_shader.t0, 2, gl.FLOAT, false, 8, 0);
+
+    drawtex_shader.use();
+    gl.uniform1i(drawtex_shader.tex0, 0);
+    gl.uniformMatrix4fv(drawtex_shader.mvp, false, matrix);
+    gl.drawArrays(gl.TRIANGLES, 0, my_quad.n);
+
+    if (!v0_enabled0)
+      gl.disableVertexAttribArray(drawtex_shader.v0);
+    if (!t0_enabled0)
+      gl.disableVertexAttribArray(drawtex_shader.t0);
+    gl.bindTexture(gl.TEXTURE_2D, prev_tex0);
+  }
+
+function drawcmtex( tex0 )
+{
+  // http://www.3dcpptutorials.sk/index.php?id=24
+
+  var v0_enabled0 = gl.getVertexAttrib(drawcmtex_shader.v0, gl.VERTEX_ATTRIB_ARRAY_ENABLED);
+  var t0_enabled0 = gl.getVertexAttrib(drawcmtex_shader.t0, gl.VERTEX_ATTRIB_ARRAY_ENABLED);
+  gl.enableVertexAttribArray(drawcmtex_shader.v0);
+  gl.enableVertexAttribArray(drawcmtex_shader.t0);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, my_quad_buffer);
+  gl.vertexAttribPointer(drawcmtex_shader.v0, 2, gl.FLOAT, false, 8, 0);
+  gl.vertexAttribPointer(drawcmtex_shader.t0, 2, gl.FLOAT, false, 8, 0);
+
+  gl.activeTexture(gl.TEXTURE0);
+  var prev_tex0 = gl.getParameter(gl.TEXTURE_BINDING_CUBE_MAP);
+  gl.bindTexture(gl.TEXTURE_CUBE_MAP, tex0);
+
+
+
+  drawcmtex_shader.use();
+    gl.uniform1i(drawcmtex_shader.tex0, 0);
+
+
+    var aspect = window.innerWidth / window.innerHeight;
+
+    matrix = m4.orthographic(0, 9*aspect, 0, 9, -1, 1);
+    matrix = m4.multiply(matrix, m4.translation(0,1,0));
+    gl.uniformMatrix4fv(drawcmtex_shader.mvp, false, matrix );
+    gl.uniformMatrix4fv(drawcmtex_shader.mtc, true, [0,0,1,0, 0,1,0,0, 1,0,0,0, 0,0,0,1] );
+    gl.drawArrays(gl.TRIANGLES, 0, my_quad.n);
+
+    matrix = m4.orthographic(0, 9*aspect, 0, 9, -1, 1);
+    matrix = m4.multiply(matrix, m4.translation(2,1,0));
+    gl.uniformMatrix4fv(drawcmtex_shader.mvp, false, matrix );
+    gl.uniformMatrix4fv(drawcmtex_shader.mtc, true, [0,0,-1,0, 0,1,0,0, -1,0,0,0, 0,0,0,1] );
+    gl.drawArrays(gl.TRIANGLES, 0, my_quad.n);
+
+matrix = m4.orthographic(0, 9*aspect, 0, 9, -1, 1);
+matrix = m4.multiply(matrix, m4.translation(1,1,0));
+gl.uniformMatrix4fv(drawcmtex_shader.mvp, false, matrix );
+gl.uniformMatrix4fv(drawcmtex_shader.mtc, true, [-1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1] );
+gl.drawArrays(gl.TRIANGLES, 0, my_quad.n);
+
+    matrix = m4.orthographic(0, 9*aspect, 0, 9, -1, 1);
+    matrix = m4.multiply(matrix, m4.translation(3,1,0));
+    gl.uniformMatrix4fv(drawcmtex_shader.mvp, false, matrix );
+    gl.uniformMatrix4fv(drawcmtex_shader.mtc, true, [1,0,0,0, 0,1,0,0, 0,0,-1,0, 0,0,0,1] );
+    gl.drawArrays(gl.TRIANGLES, 0, my_quad.n);
+
+
+    matrix = m4.orthographic(0, 9*aspect, 0, 9, -1, 1);
+    matrix = m4.multiply(matrix, m4.translation(1,2,0));
+    gl.uniformMatrix4fv(drawcmtex_shader.mvp, false, matrix );
+    gl.uniformMatrix4fv(drawcmtex_shader.mtc, true, [-1,0,0,0, 0,0,1,0, 0,-1,0,0, 0,0,0,1] );
+    gl.drawArrays(gl.TRIANGLES, 0, my_quad.n);
+
+    matrix = m4.orthographic(0, 9*aspect, 0, 9, -1, 1);
+    matrix = m4.multiply(matrix, m4.translation(1,0,0));
+    gl.uniformMatrix4fv(drawcmtex_shader.mvp, false, matrix );
+    gl.uniformMatrix4fv(drawcmtex_shader.mtc, true, [-1,0,0,0, 0,0,-1,0, 0,1,0,0, 0,0,0,1] );
+    gl.drawArrays(gl.TRIANGLES, 0, my_quad.n);
+
+    if (!v0_enabled0)
+      gl.disableVertexAttribArray(drawcmtex_shader.v0);
+    if (!t0_enabled0)
+      gl.disableVertexAttribArray(drawcmtex_shader.t0);
+    gl.bindTexture(gl.TEXTURE_CUBE_MAP, prev_tex0);
+}
+
+  </script>
+
+
+  <script>
+  init();
+  clock = new THREE.Clock();
+
+  my_quad_buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, my_quad_buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, my_quad, gl.STATIC_DRAW);
+  prepare_dpfbo();
+  prepare_cmfbo();
+  animate();
+
+
+
+
+
+  function cm_render()
+  {
+    var i;
+    var l = new vec3(light_sphere.position.x, light_sphere.position.y, light_sphere.position.z);
+    var eye = [
+      new vec3(1,0,0), new vec3(-1, 0, 0),
+      new vec3(0,1,0), new vec3( 0,-1, 0),
+      new vec3(0,0,1), new vec3( 0, 0,-1),
+    ];
+    var up = [
+      new vec3(0,-1,0), new vec3(0,-1, 0),
+      new vec3(0, 0,1), new vec3(0, 0,-1),
+      new vec3(0,-1,0), new vec3(0,-1, 0),
+    ];
+
+    var mvp;
+    cm_face_mat.uniforms["zFar"].value = zFar;
+    cm_face_mat.uniforms["l"].value.set(l.x, l.y, l.z);
+
+    var prev_color = renderer.getClearColor();
+    var prev_apaha = renderer.getClearAlpha();
+    renderer.setClearColor(new THREE.Color(1, 1, 1), 1.0);
+
+    prev_background = sceneScreen.background;
+    prev_fog = sceneScreen.fog;
+    sceneScreen.background = null;
+    sceneScreen.fog = null;
+    sceneScreen.overrideMaterial = cm_face_mat;
+
+    // cm_rt[0].texture.generateMipmaps = false;
+    for( i=0; i<6; i++ )
+    {
+      var pj = m4.perspective( Math.PI/2, 1, .001, 200 );
+      var mv = m4.lookAt([l.x, l.y, l.z], [eye[i].x + l.x, eye[i].y + l.y, eye[i].z + l.z], [up[i].x, up[i].y, up[i].z]);
+      var mvp = m4.multiply(pj,mv);
+      cm_face_mat.uniforms["mvp"].value.set(
+        mvp[0], mvp[4], mvp[8], mvp[12],
+        mvp[1], mvp[5], mvp[9], mvp[13],
+        mvp[2], mvp[6], mvp[10], mvp[14],
+        mvp[3], mvp[7], mvp[11], mvp[15]);
+      renderer.setRenderTarget(cm_rt[0],i);
+      renderer.clear();
+      renderer.render(sceneScreen, cm_camera);
+    }
+    sceneScreen.overrideMaterial = null;
+    sceneScreen.background = prev_background;
+    sceneScreen.fog = prev_fog;
+    renderer.setClearColor(prev_color, prev_apaha);
+    // cm_rt[0].texture.generateMipmaps = true;
+  }
+
+  function dp_render()
+  {
+    var i;
+    var l = new vec3(light_sphere.position.x, light_sphere.position.y, light_sphere.position.z);
+    var eye = [new vec3(0.0, 0.0, -1.0), new vec3(0.0, 0.0, 1.0)];
+    var up = [(new vec3(0.0, 1.0, 0.0)).neg(), (new vec3(0.0, 1.0, 0.0)).neg()];
+    var mvp;
+    materialRTT.uniforms["zFar"].value = zFar;
+    materialRTT.uniforms["l"].value.set(l.x, l.y, l.z);
+
+    var prev_color = renderer.getClearColor();
+    var prev_apaha = renderer.getClearAlpha();
+    renderer.setClearColor(new THREE.Color(1, 1, 1), 1.0);
+
+    prev_background = sceneScreen.background;
+    prev_fog = sceneScreen.fog;
+    sceneScreen.background = null;
+    sceneScreen.fog = null;
+    sceneScreen.overrideMaterial = materialRTT;
+    for( i=0; i<2; i++ )
+    {
+      mvp = m4.lookAt([l.x, l.y, l.z], [eye[i].x + l.x, eye[i].y + l.y, eye[i].z + l.z], [up[i].x, up[i].y, up[i].z]);
+      materialRTT.uniforms["mvp"].value.set(
+        mvp[0], mvp[4], mvp[8], mvp[12],
+        mvp[1], mvp[5], mvp[9], mvp[13],
+        mvp[2], mvp[6], mvp[10], mvp[14],
+        mvp[3], mvp[7], mvp[11], mvp[15]);
+
+      renderer.setRenderTarget(texdp_rt_id[i]);
+      renderer.clear();
+      renderer.render(sceneScreen, cameraRTT);
+    }
+    sceneScreen.overrideMaterial = null;
+    sceneScreen.background = prev_background;
+    sceneScreen.fog = prev_fog;
+    renderer.setClearColor(prev_color, prev_apaha);
+  }
+
+  function render()
+  {
+    {
+      var dtheta = 2*Math.PI * dt * time_scale/100;
+      screen_zmesh1.rotation.y -= dtheta;
+      screen_zmesh2.rotation.y -= dtheta;
+
+      if (model)
+      {
+        if( beizer_pos.length>0 )
+        {
+          //console.log(beizer_length);
+          var beizer_dt = ((new Date()).getTime()-beizer_t0)/1000 /beizer_length *tiles_per_second *tiles_length ;
+          beizer_t0 = (new Date()).getTime();
+          beizer_t = g_clamp( beizer_t+beizer_dt   , 0, 1 );
+
+          my_dot.position.copy(beizer_pos[3]);
+          lineA.verticesNeedUpdate=true;
+          lineA.vertices[2].copy(beizer_direction(beizer_t));
+          modelforward.copy(beizer_direction(beizer_t));
+
+          var tmp = new THREE.Vector3();
+          tmp.copy(modelforward);
+          tmp.cross(modelforward0);
+          model.rotation.y =  (tmp.y>0?-1:1) * Math.acos(modelforward.dot(modelforward0));
+          model.position.copy(beizer(beizer_t));
+        }
+      }
+    }
+
+    if( maptype==0 || maptype==1 )
+    {
+      dp_render();
+      genbasis_dpmap();
+    }
+    if( maptype==2 )
+    {
+      cm_render();
+      genbasis_cmmap();
+    }
+
+
+
+    var l = new vec3(light_sphere.position.x, light_sphere.position.y, light_sphere.position.z);
+    renderer.setRenderTarget(null);
+    renderer.clear();
+    materialScreen.uniforms["l"].value.set(l.x, l.y, l.z);
+    materialScreen.uniforms["eye"].value = cameraScreen.position;
+    materialScreen.uniforms["lightsize"].value = lightsize;
+    materialScreen.uniforms["zFar"].value = zFar;
+
+    cm_screen_mat.uniforms["l"].value.set(l.x, l.y, l.z);
+    cm_screen_mat.uniforms["eye"].value = cameraScreen.position;
+    cm_screen_mat.uniforms["lightsize"].value = lightsize;
+    cm_screen_mat.uniforms["zFar"].value = zFar;
+
+
+    // materialScreen.uniforms["lightmv"].value = new THREE.Matrix4();
+    // sceneScreen.overrideMaterial = materialRTT;
+    renderer.render(sceneScreen, cameraScreen);
+
+    if(draw_tex_id>=0)
+    {
+      if( maptype==0 || maptype==1 )
+      {
+        var draw_tex_matrix;
+        draw_tex_matrix = m4.orthographic(0, 4 * window.innerWidth / window.innerHeight, 0, 4, -1, 1);
+        draw_tex(texdp_id[draw_tex_id < 1 ? draw_tex_id : (draw_tex_id + 1)], draw_tex_matrix);
+        draw_tex_matrix = m4.orthographic(0, 4 * window.innerWidth / window.innerHeight, 0, 4, -1, 1);
+        draw_tex_matrix = m4.multiply(draw_tex_matrix, m4.translation(1, 0, 0));
+        draw_tex(texdp_id[draw_tex_id < 1 ? 1 : (draw_tex_id + 5)], draw_tex_matrix);
+      }
+
+      if( maptype==2 )
+        drawcmtex( cm_texid[draw_tex_id] );
+    }
+
+
+  }
+
+  var elem = document.body;
+
+function openFullscreen() {
+  if (elem.requestFullscreen) {
+    elem.requestFullscreen();
+  } else if (elem.mozRequestFullScreen) { /* Firefox */
+    elem.mozRequestFullScreen();
+  } else if (elem.webkitRequestFullscreen) { /* Chrome, Safari & Opera */
+    elem.webkitRequestFullscreen();
+  } else if (elem.msRequestFullscreen) { /* IE/Edge */
+    elem.msRequestFullscreen();
+  }
+}
+
+function closeFullscreen() {
+  if (document.exitFullscreen) {
+    document.exitFullscreen();
+  } else if (document.mozCancelFullScreen) {
+    document.mozCancelFullScreen();
+  } else if (document.webkitExitFullscreen) {
+    document.webkitExitFullscreen();
+  } else if (document.msExitFullscreen) {
+    document.msExitFullscreen();
+  }
+}
+
+</script>
+
+
+
+<script>
+
+
+document.getElementById('container').addEventListener( 'mousedown', onDocumentMouseDown, false );
+document.getElementById('container').addEventListener('mouseup', onDocumentMouseUp, false);
+
+document.getElementById('container').addEventListener( 'touchstart', onDocumentTouchStart, false );
+document.getElementById('container').addEventListener( 'touchend', onDocumentTouchEnd, false );
+
+
+
+
+
+var beizer_pos = [];
+var beizer_t0 = 0;
+var beizer_length = 0;
+var beizer_t = 0;
+
+function beizer(t)
+{
+  if( beizer_pos.length==0 )
+    return null;
+
+  var pos0 = new THREE.Vector3();
+  var pos1 = new THREE.Vector3();
+
+  t = t < 0 ? 0 : (t < 1 ? t : 1);
+
+  pos1.copy(beizer_pos[0]);
+  pos1.multiplyScalar((1 - t) * (1 - t) * (1 - t));
+  pos0.add(pos1);
+
+  pos1.copy(beizer_pos[1]);
+  pos1.multiplyScalar(3 * t * (1 - t) * (1 - t));
+  pos0.add(pos1);
+
+  pos1.copy(beizer_pos[2]);
+  pos1.multiplyScalar(3 * t * t * (1 - t));
+  pos0.add(pos1);
+
+  pos1.copy(beizer_pos[3]);
+  pos1.multiplyScalar(t * t * t);
+  pos0.add(pos1);
+
+  return pos0;
+}
+
+function beizer_direction(t)
+{
+  if( beizer_pos.length==0 )
+    return null;
+
+  var pos0 = new THREE.Vector3();
+  var pos1 = new THREE.Vector3();
+
+  t = t < 0 ? 0 : (t < 1 ? t : 1);
+
+  pos1.copy(beizer_pos[1]);
+  pos1.sub(beizer_pos[0]);
+  pos1.multiplyScalar(3*(1-t)*(1-t));
+  pos0.add(pos1);
+
+  pos1.copy(beizer_pos[2]);
+  pos1.sub(beizer_pos[1]);
+  pos1.multiplyScalar(6*(1-t)*t);
+  pos0.add(pos1);
+
+  pos1.copy(beizer_pos[3]);
+  pos1.sub(beizer_pos[2]);
+  pos1.multiplyScalar(3 * t * t);
+  pos0.add(pos1);
+
+  return pos0.normalize();
+}
+
+var x0, y0;
+
+function threejs_bezier_length(lst)
+{
+  var xs = [lst[0].x, lst[1].x, lst[2].x, lst[3].x];
+  var ys = [lst[0].z, lst[1].z, lst[2].z, lst[3].z];
+  return getArcLength(xs, ys);
+}
+
+function onDocumentMouseDown(event)
+{
+  event.preventDefault();
+  x0 = (event.clientX / window.innerWidth) * 2 - 1;
+  y0 = -(event.clientY / window.innerHeight) * 2 + 1;
+}
+function onDocumentTouchStart(event)
+{
+	event.preventDefault();
+	event = event.changedTouches[ 0 ];
+	var rect = document.getElementById('container').getBoundingClientRect();
+	x0 = ( ( event.clientX - rect.left ) / rect.width ) * 2 - 1;
+	y0 = - ( ( event.clientY - rect.top ) / rect.height ) * 2 + 1;
+}
+
+function onDocumentMouseUp(event)
+{
+  event.preventDefault();
+  x =   ( event.clientX / window.innerWidth  ) * 2 - 1;
+  y = -(event.clientY / window.innerHeight) * 2 + 1;
+  process_up(x,y);
+}
+function onDocumentTouchEnd(event)
+{
+	event.preventDefault();
+	event = event.changedTouches[ 0 ];
+	var rect = document.getElementById('container').getBoundingClientRect();
+	x = ( ( event.clientX - rect.left ) / rect.width ) * 2 - 1;
+	y = - ( ( event.clientY - rect.top ) / rect.height ) * 2 + 1;
+  process_up(x,y);
+}
+
+function process_up(x,y)
+{
+  if( Math.abs(x-x0)>.008 || Math.abs(y-y0)>.008 )
+    return;
+  
+  var mat = new THREE.Matrix4();
+  mat.multiplyMatrices( cameraScreen.projectionMatrix, cameraScreen.matrixWorldInverse );
+
+  var a, b, c, d;
+  var e, f, g, h;
+  var i, j, k, l;
+  var m, n, o, p;
+  a = mat.elements[0];
+  b = mat.elements[4];
+  c = mat.elements[8];
+  d = mat.elements[12];
+  e = mat.elements[1];
+  f = mat.elements[5];
+  g = mat.elements[9];
+  h = mat.elements[13];
+  i = mat.elements[2];
+  j = mat.elements[6];
+  k = mat.elements[10];
+  l = mat.elements[14];
+  m = mat.elements[3];
+  n = mat.elements[7];
+  o = mat.elements[11];
+  p = mat.elements[15];
+
+  var xx, zz;
+  xx =  ((h-y*p)*(c-x*o)-(d-x*p)*(g-y*o)) / 
+        ((a-x*m)*(g-y*o)-(e-y*m)*(c-x*o)) ;
+
+  zz = -((h-y*p)*(a-x*m)-(d-x*p)*(e-y*m)) / 
+        ((a-x*m)*(g-y*o)-(e-y*m)*(c-x*o)) ;
+
+
+  var endpt     = new THREE.Vector3(xx, 0, zz);
+  var endpt_dir = new THREE.Vector3();
+
+  endpt_dir.copy(endpt);
+  endpt_dir.sub(model.position);
+  var l = endpt_dir.length();
+  endpt_dir.normalize();
+
+  var tmp = new THREE.Vector3();
+  endpt_dir.copy(cameraScreen.position);
+  endpt_dir.sub(endpt);
+  endpt_dir.y=0;
+  endpt_dir.normalize();
+
+
+
+  if( beizer_pos.length==0 )
+  {
+    beizer_pos.push( new THREE.Vector3() );
+    beizer_pos.push( new THREE.Vector3() );
+    beizer_pos.push( new THREE.Vector3() );
+    beizer_pos.push( new THREE.Vector3() );
+  }
+
+
+
+  beizer_pos[0].copy(model.position);
+
+  var vd = endpt_dir.dot(modelforward);
+
+  beizer_pos[1].copy(modelforward);
+  beizer_pos[1].multiplyScalar(l*.5 * Math.min(1.5+vd,1));
+  beizer_pos[1].add(model.position);
+
+  beizer_pos[2].copy(endpt_dir);
+  beizer_pos[2].multiplyScalar(-l * .5);
+  beizer_pos[2].add(endpt);
+
+  beizer_pos[3].copy(endpt);
+
+  beizer_length = threejs_bezier_length(beizer_pos);
+  beizer_t0 = (new Date()).getTime();
+  beizer_t = 0;
+}
+
+
+
+  </script>
+</body>
+</html>
