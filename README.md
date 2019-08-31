@@ -15,7 +15,7 @@ This program contains eight folders, three _js_ files, a _html_ file and a _png_
 
 ### Folders
 
-The folders _build_, _files_, _fonts_, _js_, _jsm_, _models_ and _nodes_ are taken form _Three.js library_. They contain the materials needed for the demo, such as the robot, the rings, the control bars, ect.
+The folders _build_, _files_, _fonts_, _js_, _jsm_, _models_ and _nodes_ are taken form _Three.js library_. They contain the materials needed for the demo, such as the robot, the rings, the control bar, ect.
 
 The folder _shader_js_ contains the GLSL shaders for the omnidirectional soft shadow generation. 
 - cm_shader.js  
