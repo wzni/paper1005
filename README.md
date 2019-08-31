@@ -11,9 +11,11 @@ Readers can browse the demo here [The demo](https://wzni.github.io/paper1005/) o
 
 ## Content
 
+This program contains eight folders, three _js_ files, a _html_ file and a _png_ file. Their roles are shown as follows.
+
 ### Folders
 
-The folders _build_, _files_, _fonts_, _js_, _jsm_ and _models_ are taken form _Three.js library_. They contain the materials needed for the demo, such as the robot, the rings, the control bars, ect.
+The folders _build_, _files_, _fonts_, _js_, _jsm_, _models_ and _nodes_ are taken form _Three.js library_. They contain the materials needed for the demo, such as the robot, the rings, the control bars, ect.
 
 The folder _shader_js_ contains the GLSL shaders for the omnidirectional soft shadow generation. 
 - cm_shader.js  
@@ -36,21 +38,24 @@ The folder _shader_js_ contains the GLSL shaders for the omnidirectional soft sh
   
 - genbasis_shader_cm.js  
   It is used for generationg the CSM basis textures and CSM-Z basis textures in cubemap format.
+ 
+### Files
   
-  ### Files
-  
-  - bezier_length.js 
-    It is used for calculating the motion path of the robot when clicking the floor.
+- bezier_length.js 
+  It is used for calculating the motion path of the robot when clicking the floor.
     
-  - g_shader.js 
-    It is a file for manipulating the shader files.
+- g_shader.js 
+  It is a shader function file for manipulating the shader files.
     
-  - g_vector.js
-    It is a file for manipulating the vector data.
+- g_vector.js
+  It is a vector function file for manipulating the vector data.
   
-  - index.html
-    It is the demo. 
+- index.html
+  It is the demo. 
 
-  - webgl_demo.png
-    It is an illustrative figure of this demo which is shown above.
+- m4.js
+  It is a various 3d math functions file.
+  
+- webgl_demo.png
+  It is an illustrative figure of this demo which is shown above.
 
