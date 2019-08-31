@@ -44,7 +44,7 @@ The folder _shader_js_ contains the GLSL shaders for the omnidirectional soft sh
 - bezier_length.js 
   It is used for calculating the motion path of the robot when clicking the floor.
     
-- g_shader.js 
+- g_shader.js
   It is a shader function file for manipulating the shader files.
     
 - g_vector.js
