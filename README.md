@@ -1,4 +1,4 @@
-# WebGL demo - paper1005
+# WebGL demo - _Seamless Mipmap Filtering for Dual Paraboloid Maps_
 
 ## Introduction
 This program is the WebGL demo of the paper _Seamless Mipmap Filtering for Dual Paraboloid Maps_, which is accepted by the conference Pacific Graphics 2019. 
