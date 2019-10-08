@@ -135,32 +135,41 @@ return max(p.x/(1.0+p.y)
 - (p.x*t.y-p.y*t.x)/(1.0+dot(p,t)), fs);
 }
 
-vec4 _f4mipmapDPMAP(sampler2D frontface, sampler2D backface, vec3 uv, float fs)
+
+void wfunc( float zval, float fs, out float s0, out float sb )
 {
-  fs = fscm2dp(fs);
-  uv = normalize(uv);
-
-  fs=.74*ufunc(uv.z, fs);
-
-  float W0 = float(textureSize(frontface, 0).x);
-  float ml = log(W0*fs) / log(2.0);
-  vec2 tc = vec2(uv.x, uv.y) / (1.0 +uv.z);
-  vec2 coordf = vec2(-tc.x, tc.y) *.5+.5;
-  vec4 cfront= textureLod(frontface, coordf.xy, ml);
-  tc = uv.xy / (1.0 -uv.z);
-  vec2 coordb = tc*.5 +.5;
-  vec4 cback = textureLod(backface, coordb.xy, ml);
-
-  //seams
- // return uv.z < 0.0 ? cback : cfront;
-
-  // delete seams
-  float resolution = 1.0 / fs;
-  float sss = clamp((length(uv.xy)/(1.0 +abs(uv.z))-1.0)*resolution+1.0, 0.0, 1.0) * .5;
-  if(uv.z < 0.0)
-  sss = 1.0 -sss;
-  return mix(cfront, cback, sss);
+  s0 = 1.0-sqrt(1.0-zval*zval)/(1.0+abs(zval));
+  sb = min(s0/fs,1.0)*sign(zval)*.5+.5;
 }
+
+vec4 _f4mipmapDPMAP(sampler2D frontface, sampler2D backface, vec3 p, float fs)
+{
+  p = normalize(p);
+  fs = ufunc(p.z,fs);
+  float W0 = float(textureSize(frontface,0).x);
+  float ml = log(W0*fs)/log(2.0);
+  
+  float s0, sb;
+  wfunc( p.z, fs, s0, sb );
+ 
+  vec4 cfront=vec4(0), cback=vec4(0);
+  vec2 tc = p.xy/(1.0-p.z);
+  if(s0<fs || p.z<0.0)
+    cback = textureLod(backface, tc*.5+.5, ml);
+   tc = vec2(-p.x, p.y)/(1.0+p.z);
+  if(s0<fs || p.z>0.0)
+    cfront = textureLod(frontface, tc*.5+.5, ml);
+    
+  return mix(cback, cfront, sb);
+}
+
+
+
+
+
+
+
+
 
 vec4 f4mipmapDPMAP(sampler2D frontface, sampler2D backface, vec3 uv, float fs)
 {
