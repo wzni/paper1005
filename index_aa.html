@@ -603,9 +603,9 @@ void main()
 
   var container, gui, stats, renderer;
 
-  var state_api = { state: 'Walking' };
+  var state_api = { state: 'Idle' };
 
-
+  
   var map_select = ['Seamless DP Map', 'Cubemap'];
   var map_select_api = { map_type: 'Seamless DP Map' };
   var maptype = 0;
@@ -641,14 +641,14 @@ void main()
   var tiles_per_second = 5;
   var tiles_length = .2;
   var my_quad, my_quad_buffer;
-  var time_scale = 60;
+  var time_scale = 1;
   var draw_tex_id = 1;
   var num_of_display_robot = 1;
                    
   var model = new Array(), mixer = new Array();
   var modelforward0 = new THREE.Vector3(0, 0, 1);
   var modelforward = new THREE.Vector3(0, 0, 1);
-  var actions, activeAction, previousAction;
+  var actions, activeAction, previousAction, action_name;
   var my_dot;
 
   function onWindowResize()
@@ -910,7 +910,8 @@ void main()
     var states = ['Idle', 'Walking', 'Running', 'Dance', 'Death', 'Sitting', 'Standing'];
 
     actions = {};
-    for (var i = 0; i < animations.length; i++) {
+    for (var i = 0; i < animations.length; i++)
+    {
       var clip = animations[i];
       var action = mixer[0].clipAction(clip);
       actions[clip.name] = action;
@@ -920,15 +921,19 @@ void main()
       }
     }
 
-    activeAction = actions['Walking'];
+    action_name = 'Idle';
+    activeAction = actions[action_name];
     activeAction.play();
 
     // states
     var statesFolder = gui.addFolder('States');
     var states_clipCtrl = statesFolder.add(state_api, 'state').options(states);
-    states_clipCtrl.onChange(function ()
+    states_clipCtrl.onChange(function (val)
     {
-
+      action_name = val;
+      activeAction.stop();
+      activeAction = actions[action_name];
+      activeAction.play();
     });
     statesFolder.open();
 
@@ -994,7 +999,7 @@ void main()
       function (val) {
         num_of_display_robot = val;
       });
-    expressionFolder.add(settings, 'time_scale', 1, 100, 1).onChange(
+    expressionFolder.add(settings, 'time_scale', 0.0, 3, .0001).onChange(
       function (val) {
         time_scale = val;
       });
@@ -1009,35 +1014,38 @@ var tiles_per_second = 5;
 var tile_length = .2;
 
 function animate()
+{
+  dt = clock.getDelta() * time_scale;
+
+
+  theta0 += dt*.1;
+
+  for( var i=1; i<num_of_display_robot; i++ )
+    model[i].visible = true;
+  for( var i=num_of_display_robot; i<model.length; i++ )
+    model[i].visible = false;
+
+  var nrobot = Math.min(num_of_display_robot,model.length);
+  for( var i=1; i<nrobot; i++ )
   {
-    dt = clock.getDelta();
-    theta0 += dt*.1;
-
-    for( var i=1; i<num_of_display_robot; i++ )
-      model[i].visible = true;
-    for( var i=num_of_display_robot; i<model.length; i++ )
-      model[i].visible = false;
-
-    var nrobot = Math.min(num_of_display_robot,model.length);
-    for( var i=1; i<nrobot; i++ )
-    {
-      var theta = 2*Math.PI/nrobot*i   + theta0;
-      var radius = tile_length*2 * nrobot / (2*Math.PI);
-      radius = Math.max(1,radius);
-      model[i].rotation.y = -theta;
-      model[i].position.set( Math.cos(theta)*radius, 0, Math.sin(theta)*radius );
-    }
-
-    for( var i=0; i<Math.min(num_of_display_robot,mixer.length); i++ )
-      if (mixer[i]) mixer[i].update(dt * tiles_per_second*tiles_length);
-
-
-
-    requestAnimationFrame(animate);
-    cameraScreen_controls.update();
-    render();
-    stats.update();
+    var theta = 2*Math.PI/nrobot*i   + theta0;
+    var radius = tile_length*2 * nrobot / (2*Math.PI);
+    radius = Math.max(1,radius);
+    model[i].rotation.y = -theta;
+    model[i].position.set( Math.cos(theta)*radius, 0, Math.sin(theta)*radius );
   }
+
+  if (mixer[0]) mixer[0].update(dt * tiles_per_second*tiles_length);
+  for( var i=1; i<Math.min(num_of_display_robot,mixer.length); i++ )
+    if (mixer[i]) mixer[i].update(dt * 5*tiles_length);
+
+                                  
+
+  requestAnimationFrame(animate);
+  cameraScreen_controls.update();
+  render();
+  stats.update();
+}
 
   </script>
 
@@ -1400,7 +1408,7 @@ gl.drawArrays(gl.TRIANGLES, 0, my_quad.n);
   function render()
   {
     {
-      var dtheta = 2*Math.PI * dt * time_scale/100;
+      var dtheta = 2*Math.PI * dt * .6;
       screen_zmesh1.rotation.y -= dtheta;
       screen_zmesh2.rotation.y -= dtheta;
 
@@ -1408,10 +1416,33 @@ gl.drawArrays(gl.TRIANGLES, 0, my_quad.n);
       {
         if( beizer_pos.length>0 )
         {
+
           //console.log(beizer_length);
-          var beizer_dt = ((new Date()).getTime()-beizer_t0)/1000 /beizer_length *tiles_per_second *tiles_length ;
+          var beizer_dt = ((new Date()).getTime()-beizer_t0)/1000 /beizer_length *tiles_per_second *tiles_length * time_scale ;
           beizer_t0 = (new Date()).getTime();
           beizer_t = g_clamp( beizer_t+beizer_dt   , 0, 1 );
+
+          // ['Idle', 'Walking', 'Running', 'Dance', 'Death', 'Sitting', 'Standing'];
+          if( beizer_t!=1 )
+          {
+            if( action_name != 'Running' )
+            {
+              action_name = 'Running';
+              activeAction.stop();
+              activeAction = actions[action_name];
+              activeAction.play();
+            }
+          }else
+          {
+            if( action_name != state_api.state )
+            {
+              action_name = state_api.state;
+              activeAction.stop();
+              activeAction = actions[action_name];
+              activeAction.play();
+            }
+          }
+
 
           my_dot.position.copy(beizer_pos[3]);
           lineA.verticesNeedUpdate=true;
