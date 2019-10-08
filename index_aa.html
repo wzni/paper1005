@@ -634,8 +634,9 @@ void main()
   var my_quad, my_quad_buffer;
   var time_scale = 60;
   var draw_tex_id = 1;
-
-  var model;
+  var num_of_display_robot = 1;
+                   
+  var model = new Array(), mixer = new Array();
   var modelforward0 = new THREE.Vector3(0, 0, 1);
   var modelforward = new THREE.Vector3(0, 0, 1);
   var actions, activeAction, previousAction;
@@ -647,6 +648,9 @@ void main()
     cameraScreen.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
   }
+
+
+  var mixer, clock;
 
   function init()
   {
@@ -854,37 +858,36 @@ void main()
     var line = new THREE.Line(lineA, material);
     sceneScreen.add(line);
 
-    var loader = new THREE.GLTFLoader();
-    loader.load('models/gltf/RobotExpressive/RobotExpressive.glb', function (gltf) {
-
-      model = gltf.scene;
-      model.scale.set(.1, .1, .1);
-      model.translateOnAxis(modelforward, .3);
-      model.position.set(.6, 0, .6);
-      sceneScreen.add(model);
-
-      // console.log(model);
-
-      createGUI(model, gltf.animations);
-
-    }, undefined, function (e) {
-      console.error(e);
-    });
-
-    for(i=0;i<1;i++)
+    var i;
+    for( i=0; i<32; i++ )
     {
       var loader = new THREE.GLTFLoader();
-      loader.load('models/gltf/RobotExpressive/RobotExpressive.glb', function (gltf) {
+      loader.load('models/gltf/RobotExpressive/RobotExpressive.glb', function (gltf)
+      {
+        var tmp = gltf.scene;
+        model.push(tmp);
+        tmp.scale.set(.1, .1, .1);
+        tmp.translateOnAxis(modelforward, .3);
+       
+        tmp.position.set(1, 0, -(model.length-1)*tile_length*2);
+        
+        sceneScreen.add(tmp);
 
-        model[i] = gltf.scene;
-        model[i].scale.set(.1, .1, .1);
-        model[i].translateOnAxis(modelforward, .3);
-        model[i].position.set(1, 0, 0);
-        sceneScreen.add(model[i]);
-
-        // console.log(model);
-
-        createGUI(model[i], gltf.animations);
+        var tmp_mixer = new THREE.AnimationMixer(tmp);
+        mixer.push( tmp_mixer );
+        if(model.length==1)
+          createGUI(tmp, gltf.animations);
+        else
+        {
+          for (var i = 0; i < gltf.animations.length; i++)
+          {
+            if( gltf.animations[i].name=='Walking' )
+            {
+              tmp_mixer.clipAction(gltf.animations[i]).play();
+              break;
+            }
+          }
+        }
 
       }, undefined, function (e) {
         console.error(e);
@@ -893,16 +896,14 @@ void main()
 
   }
 
-  var mixer, clock;
   function createGUI(model, animations)
   {
     var states = ['Idle', 'Walking', 'Running', 'Dance', 'Death', 'Sitting', 'Standing'];
 
-    mixer = new THREE.AnimationMixer(model);
     actions = {};
     for (var i = 0; i < animations.length; i++) {
       var clip = animations[i];
-      var action = mixer.clipAction(clip);
+      var action = mixer[0].clipAction(clip);
       actions[clip.name] = action;
       if (states.indexOf(clip.name) >= 4) {
         action.clampWhenFinished = true;
@@ -954,6 +955,7 @@ void main()
       'lightsize': lightsize,
       'Tiles/Second': tiles_per_second,
       'tex_id':draw_tex_id,
+      'robot number':num_of_display_robot,
       'time_scale': time_scale,
       'full screen': 0
   };
@@ -979,6 +981,10 @@ void main()
       function (val) {
         draw_tex_id = val;
       });
+    expressionFolder.add(settings, 'robot number', 1, 32, 1).onChange(
+      function (val) {
+        num_of_display_robot = val;
+      });
     expressionFolder.add(settings, 'time_scale', 1, 100, 1).onChange(
       function (val) {
         time_scale = val;
@@ -988,11 +994,36 @@ void main()
 
   }
 
-  var dt;
-  function animate()
+var dt;
+var theta0 = 0;
+var tiles_per_second = 5;
+var tile_length = .2;
+
+function animate()
   {
     dt = clock.getDelta();
-    if (mixer) mixer.update(dt * tiles_per_second*tiles_length);
+    theta0 += dt*.1;
+
+    for( var i=1; i<num_of_display_robot; i++ )
+      model[i].visible = true;
+    for( var i=num_of_display_robot; i<model.length; i++ )
+      model[i].visible = false;
+
+    var nrobot = Math.min(num_of_display_robot,model.length);
+    for( var i=1; i<nrobot; i++ )
+    {
+      var theta = 2*Math.PI/nrobot*i   + theta0;
+      var radius = tile_length*2 * nrobot / (2*Math.PI);
+      radius = Math.max(1,radius);
+      model[i].rotation.y = -theta;
+      model[i].position.set( Math.cos(theta)*radius, 0, Math.sin(theta)*radius );
+    }
+
+    for( var i=0; i<Math.min(num_of_display_robot,mixer.length); i++ )
+      if (mixer[i]) mixer[i].update(dt * tiles_per_second*tiles_length);
+
+
+
     requestAnimationFrame(animate);
     cameraScreen_controls.update();
     render();
@@ -1364,7 +1395,7 @@ gl.drawArrays(gl.TRIANGLES, 0, my_quad.n);
       screen_zmesh1.rotation.y -= dtheta;
       screen_zmesh2.rotation.y -= dtheta;
 
-      if (model)
+      if (model[0])
       {
         if( beizer_pos.length>0 )
         {
@@ -1381,8 +1412,8 @@ gl.drawArrays(gl.TRIANGLES, 0, my_quad.n);
           var tmp = new THREE.Vector3();
           tmp.copy(modelforward);
           tmp.cross(modelforward0);
-          model.rotation.y =  (tmp.y>0?-1:1) * Math.acos(modelforward.dot(modelforward0));
-          model.position.copy(beizer(beizer_t));
+          model[0].rotation.y =  (tmp.y>0?-1:1) * Math.acos(modelforward.dot(modelforward0));
+          model[0].position.copy(beizer(beizer_t));
         }
       }
     }
@@ -1624,7 +1655,7 @@ function process_up(x,y)
   var endpt_dir = new THREE.Vector3();
 
   endpt_dir.copy(endpt);
-  endpt_dir.sub(model.position);
+  endpt_dir.sub(model[0].position);
   var l = endpt_dir.length();
   endpt_dir.normalize();
 
@@ -1646,13 +1677,13 @@ function process_up(x,y)
 
 
 
-  beizer_pos[0].copy(model.position);
+  beizer_pos[0].copy(model[0].position);
 
   var vd = endpt_dir.dot(modelforward);
 
   beizer_pos[1].copy(modelforward);
   beizer_pos[1].multiplyScalar(l*.5 * Math.min(1.5+vd,1));
-  beizer_pos[1].add(model.position);
+  beizer_pos[1].add(model[0].position);
 
   beizer_pos[2].copy(endpt_dir);
   beizer_pos[2].multiplyScalar(-l * .5);
