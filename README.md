@@ -1,7 +1,7 @@
 # WebGL demo - _Seamless Mipmap Filtering for Dual Paraboloid Maps_
 
 ## Introduction
-This program is the WebGL demo of the paper _Seamless Mipmap Filtering for Dual Paraboloid Maps_, which is accepted by the conference Pacific Graphics 2019. 
+This program is the WebGL demo of the paper [_Seamless Mipmap Filtering for Dual Paraboloid Maps_](https://onlinelibrary.wiley.com/doi/full/10.1111/cgf.13850), which is accepted by the conference Pacific Graphics 2019. 
 
 It demonstrates the omnidirectional soft shadows using dual paraboloid mapping and mipmapping. It is implemented using WebGL and _Three.js library_. The demo can be browsed with Chrome on any Android device with a decent GPU theorectically. 
 
